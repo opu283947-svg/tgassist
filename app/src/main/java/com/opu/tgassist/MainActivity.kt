@@ -125,8 +125,9 @@ class MainActivity : Activity() {
         val acc = accessibilityOn()
         status.text = when {
             !acc -> "Accessibility বন্ধ। বাটনে চাপুন, সেটিংসে গিয়ে চালু করুন"
-            Bot.enabled -> "চালু আছে। এখন Telegram খুলুন"
-            else -> "প্রস্তুত। বাটন চাপলে শুরু হবে"
+            Bot.enabled && Bot.inTelegram -> "▶ কাজ চলছে (Telegram-এ আছে)"
+            Bot.enabled -> "⏸ বিরতি: Telegram-এ গেলে নিজে চালু হবে"
+            else -> "প্রস্তুত। ON করে Telegram খুলুন"
         }
         power.text = if (Bot.enabled) "ON" else "OFF"
         val bg = GradientDrawable().apply {

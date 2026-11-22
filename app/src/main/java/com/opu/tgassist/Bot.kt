@@ -8,6 +8,7 @@ import java.util.Locale
 object Bot {
     @Volatile var enabled = false
     @Volatile var serviceConnected = false
+    @Volatile var inTelegram = false
 
     private val lines = ArrayDeque<String>()
     private val fmt = SimpleDateFormat("HH:mm:ss", Locale.US)

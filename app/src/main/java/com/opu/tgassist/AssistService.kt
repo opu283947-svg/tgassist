@@ -1,6 +1,9 @@
 package com.opu.tgassist
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
+import android.graphics.Rect
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
@@ -9,7 +12,6 @@ class AssistService : AccessibilityService() {
     private var lastDumpAt = 0L
     private var lastSig = ""
     private var lastTapAt = 0L
-    private var lastOtherPkg = ""
 
     private fun isTelegram(pkg: String): Boolean {
         val p = pkg.lowercase()
@@ -19,7 +21,7 @@ class AssistService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         Bot.serviceConnected = true
-        Bot.log("Accessibility চালু হয়েছে (v0.2: শুধু Telegram)")
+        Bot.log("Accessibility চালু (v0.4: Telegram-only, বাইরে গেলে বিরতি)")
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
@@ -30,22 +32,28 @@ class AssistService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (!Bot.enabled || event == null) return
+        if (event == null) return
         val pkg = event.packageName?.toString() ?: return
-        if (pkg == packageName) return
 
-        // Telegram ছাড়া অন্য অ্যাপের কিছুই পড়া বা লগ করা হবে না
-        if (!isTelegram(pkg)) {
-            if (pkg != lastOtherPkg) {
-                lastOtherPkg = pkg
-                Bot.log("(অন্য অ্যাপ: $pkg, কিছু পড়া হয়নি)")
+        // Telegram-এর ভেতরে আছি কি না ট্র্যাক করা (বাইরে গেলে বিরতি, বন্ধ নয়)
+        val noise = pkg.contains("systemui") || pkg.contains("inputmethod") || pkg.contains("keyboard")
+        if (!noise) {
+            val nowIn = isTelegram(pkg)
+            val isStateChange = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            if (nowIn && !Bot.inTelegram) {
+                Bot.inTelegram = true
+                if (Bot.enabled) Bot.log("▶ Telegram-এ আছি, কাজ চলছে")
+            } else if (!nowIn && isStateChange && Bot.inTelegram) {
+                Bot.inTelegram = false
+                if (Bot.enabled) Bot.log("⏸ Telegram-এর বাইরে ($pkg), বিরতি। ফিরলে নিজে চলবে")
             }
-            return
         }
-        lastOtherPkg = ""
+
+        if (!Bot.enabled) return
+        if (!isTelegram(pkg)) return   // Telegram ছাড়া অন্য অ্যাপের কিছুই পড়া হয় না
 
         val now = System.currentTimeMillis()
-        if (now - lastDumpAt < 2000) return
+        if (now - lastDumpAt < 1500) return
         lastDumpAt = now
 
         val root = rootInActiveWindow ?: run {
@@ -61,43 +69,84 @@ class AssistService : AccessibilityService() {
             lastSig = sig
             Bot.log("── [$pkg] ${texts.size}টা আইটেম ──")
             if (texts.isEmpty()) Bot.log("(কোনো লেখা পাওয়া যায়নি, সম্ভবত ছবি/WebView)")
-            for (t in texts.take(60)) Bot.log(t)
+            for (t in texts.take(70)) Bot.log(t)
         }
 
-        // প্রথম ট্যাপ পরীক্ষা: চ্যাটে "Open CherryPlay" থাকলে ট্যাপ
-        if (now - lastTapAt > 6000) {
-            if (tapByText(root, "Open CherryPlay")) lastTapAt = now
+        // চ্যাটে "Open CherryPlay" থাকলে ওটার ওপর আঙুলের ট্যাপ
+        if (now - lastTapAt > 8000) {
+            val found = ArrayList<AccessibilityNodeInfo>()
+            findAll(root, "Open CherryPlay", found, 0)
+            if (found.isNotEmpty()) {
+                lastTapAt = now
+                tapNode(found.last(), "Open CherryPlay")
+            }
         }
     }
 
-    private fun tapByText(root: AccessibilityNodeInfo, label: String): Boolean {
-        val nodes = root.findAccessibilityNodeInfosByText(label)
-        if (nodes.isNullOrEmpty()) return false
-        // সবচেয়ে নিচের (নতুন) বাটনটা নেব
-        val target = nodes.last()
-        var n: AccessibilityNodeInfo? = target
-        var depth = 0
-        while (n != null && depth < 6) {
-            if (n.isClickable) {
-                val ok = n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                Bot.log("👆 ট্যাপ করা হলো: \"$label\" ${if (ok) "(সফল)" else "(ব্যর্থ)"}")
-                return ok
-            }
-            n = n.parent
-            depth++
+    private fun findAll(n: AccessibilityNodeInfo?, label: String,
+                        out: ArrayList<AccessibilityNodeInfo>, depth: Int) {
+        if (n == null || depth > 40) return
+        val t = n.text?.toString().orEmpty()
+        val d = n.contentDescription?.toString().orEmpty()
+        if (t.contains(label, true) || d.contains(label, true)) out.add(n)
+        for (i in 0 until n.childCount) findAll(n.getChild(i), label, out, depth + 1)
+    }
+
+    private fun tapNode(n: AccessibilityNodeInfo, label: String) {
+        val r = Rect()
+        n.getBoundsInScreen(r)
+        if (r.width() <= 0 || r.height() <= 0) {
+            Bot.log("⚠ \"$label\" পাওয়া গেছে কিন্তু জায়গা (bounds) ঠিক নেই: $r")
+            return
         }
-        Bot.log("⚠ \"$label\" পাওয়া গেছে কিন্তু ট্যাপযোগ্য নয়")
-        return false
+        val ok = tapAt(r.exactCenterX(), r.exactCenterY(), label)
+        if (!ok) {
+            // বিকল্প: ACTION_CLICK
+            var p: AccessibilityNodeInfo? = n
+            var depth = 0
+            while (p != null && depth < 6) {
+                if (p.isClickable) {
+                    val c = p.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    Bot.log("↩ বিকল্প ACTION_CLICK: ${if (c) "সফল" else "ব্যর্থ"}")
+                    return
+                }
+                p = p.parent
+                depth++
+            }
+        }
+    }
+
+    private fun tapAt(x: Float, y: Float, label: String): Boolean {
+        val path = Path().apply { moveTo(x, y) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+            .build()
+        val ok = dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
+            override fun onCompleted(g: GestureDescription?) {
+                Bot.log("✅ ট্যাপ সম্পন্ন")
+            }
+            override fun onCancelled(g: GestureDescription?) {
+                Bot.log("⚠ ট্যাপ বাতিল (হাত লেগেছে?), আবার চেষ্টা করব")
+                lastTapAt = System.currentTimeMillis() - 6500
+            }
+        }, null)
+        Bot.log("👆 ট্যাপ \"$label\" (${x.toInt()},${y.toInt()}) পাঠানো=$ok")
+        return ok
     }
 
     private fun collect(n: AccessibilityNodeInfo?, out: ArrayList<String>, depth: Int) {
-        if (n == null || depth > 40 || out.size > 200) return
+        if (n == null || depth > 40 || out.size > 250) return
         val t = n.text?.toString()?.trim().orEmpty()
         val d = n.contentDescription?.toString()?.trim().orEmpty()
         val label = if (t.isNotEmpty()) t else d
         if (label.isNotEmpty()) {
-            val tag = if (n.isClickable) "[ট্যাপ]" else "[লেখা]"
-            out.add("$tag ${label.take(70)}")
+            if (n.isClickable) {
+                val r = Rect()
+                n.getBoundsInScreen(r)
+                out.add("[ট্যাপ ${r.centerX()},${r.centerY()}] ${label.take(70)}")
+            } else {
+                out.add("[লেখা] ${label.take(70)}")
+            }
         }
         for (i in 0 until n.childCount) collect(n.getChild(i), out, depth + 1)
     }
