@@ -8,11 +8,18 @@ class AssistService : AccessibilityService() {
 
     private var lastDumpAt = 0L
     private var lastSig = ""
+    private var lastTapAt = 0L
+    private var lastOtherPkg = ""
+
+    private fun isTelegram(pkg: String): Boolean {
+        val p = pkg.lowercase()
+        return p.contains("telegram") || p.contains("challegram") || p.contains("nekogram")
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         Bot.serviceConnected = true
-        Bot.log("Accessibility চালু হয়েছে")
+        Bot.log("Accessibility চালু হয়েছে (v0.2: শুধু Telegram)")
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
@@ -27,6 +34,16 @@ class AssistService : AccessibilityService() {
         val pkg = event.packageName?.toString() ?: return
         if (pkg == packageName) return
 
+        // Telegram ছাড়া অন্য অ্যাপের কিছুই পড়া বা লগ করা হবে না
+        if (!isTelegram(pkg)) {
+            if (pkg != lastOtherPkg) {
+                lastOtherPkg = pkg
+                Bot.log("(অন্য অ্যাপ: $pkg, কিছু পড়া হয়নি)")
+            }
+            return
+        }
+        lastOtherPkg = ""
+
         val now = System.currentTimeMillis()
         if (now - lastDumpAt < 2000) return
         lastDumpAt = now
@@ -35,17 +52,42 @@ class AssistService : AccessibilityService() {
             Bot.log("[$pkg] স্ক্রিন পড়া যাচ্ছে না (root null)")
             return
         }
+        if (!isTelegram(root.packageName?.toString() ?: "")) return
+
         val texts = ArrayList<String>()
         collect(root, texts, 0)
         val sig = pkg + texts.joinToString("|")
-        if (sig == lastSig) return
-        lastSig = sig
-
-        Bot.log("── [$pkg] ${texts.size}টা আইটেম ──")
-        if (texts.isEmpty()) {
-            Bot.log("(কোনো লেখা পাওয়া যায়নি, সম্ভবত ছবি/WebView)")
+        if (sig != lastSig) {
+            lastSig = sig
+            Bot.log("── [$pkg] ${texts.size}টা আইটেম ──")
+            if (texts.isEmpty()) Bot.log("(কোনো লেখা পাওয়া যায়নি, সম্ভবত ছবি/WebView)")
+            for (t in texts.take(60)) Bot.log(t)
         }
-        for (t in texts.take(60)) Bot.log(t)
+
+        // প্রথম ট্যাপ পরীক্ষা: চ্যাটে "Open CherryPlay" থাকলে ট্যাপ
+        if (now - lastTapAt > 6000) {
+            if (tapByText(root, "Open CherryPlay")) lastTapAt = now
+        }
+    }
+
+    private fun tapByText(root: AccessibilityNodeInfo, label: String): Boolean {
+        val nodes = root.findAccessibilityNodeInfosByText(label)
+        if (nodes.isNullOrEmpty()) return false
+        // সবচেয়ে নিচের (নতুন) বাটনটা নেব
+        val target = nodes.last()
+        var n: AccessibilityNodeInfo? = target
+        var depth = 0
+        while (n != null && depth < 6) {
+            if (n.isClickable) {
+                val ok = n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                Bot.log("👆 ট্যাপ করা হলো: \"$label\" ${if (ok) "(সফল)" else "(ব্যর্থ)"}")
+                return ok
+            }
+            n = n.parent
+            depth++
+        }
+        Bot.log("⚠ \"$label\" পাওয়া গেছে কিন্তু ট্যাপযোগ্য নয়")
+        return false
     }
 
     private fun collect(n: AccessibilityNodeInfo?, out: ArrayList<String>, depth: Int) {
