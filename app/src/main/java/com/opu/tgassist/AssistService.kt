@@ -38,7 +38,7 @@ class AssistService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         Bot.serviceConnected = true
-        Bot.log("Accessibility চালু (v0.9)")
+        Bot.log("Accessibility চালু (v11-fixed)")
         startWorker()
     }
 
@@ -72,6 +72,7 @@ class AssistService : AccessibilityService() {
         if (!Bot.enabled) return
         if (!isTelegram(pkg)) return
 
+        // Watch mode: capture screen before user tap (for record)
         if (Bot.watch && !Bot.busy && event.eventType != AccessibilityEvent.TYPE_VIEW_CLICKED) {
             val nowW = System.currentTimeMillis()
             if (nowW - lastPrevAt > 700) {
@@ -81,6 +82,7 @@ class AssistService : AccessibilityService() {
             }
         }
 
+        // User tap detection (for record mode)
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
             noteUserTap(event)
             return
@@ -100,21 +102,25 @@ class AssistService : AccessibilityService() {
             recordPage("নিজে নিজে", items)
         }
 
-        if (!Bot.watch && now - lastTapAt > 8000) {
-            val m = items.filter { it.label.contains("Open CherryPlay", true) }
-            if (m.isNotEmpty()) {
-                lastTapAt = now
-                val r = m[m.size - 1].rect
-                tapAtAsync(r.exactCenterX(), r.exactCenterY())
-            }
-        }
-        if (!Bot.watch && now - lastTapAt > 3000) {
+        // AUTO-TAP: Only when NOT watching, NOT busy, and in Mini App
+        if (!Bot.watch && !Bot.busy && inMiniApp()) {
+            // 1. Dismiss "Maybe later" popup
             val dm = items.filter { it.label.equals("Maybe later", true) }
-            if (dm.isNotEmpty()) {
+            if (dm.isNotEmpty() && now - lastTapAt > 3000) {
                 lastTapAt = now
                 val r2 = dm[dm.size - 1].rect
                 Bot.log("🧹 পপআপ বন্ধ করছি: Maybe later")
                 tapAtAsync(r2.exactCenterX(), r2.exactCenterY())
+                return
+            }
+            // 2. Auto-tap "Open CherryPlay" ONLY if we're in bot chat (not Mini App yet)
+            if (now - lastTapAt > 8000) {
+                val m = items.filter { it.label.contains("Open CherryPlay", true) }
+                if (m.isNotEmpty() && !inMiniApp()) {  // <-- KEY FIX: only tap if NOT in Mini App
+                    lastTapAt = now
+                    val r = m[m.size - 1].rect
+                    tapAtAsync(r.exactCenterX(), r.exactCenterY())
+                }
             }
         }
     }
@@ -130,7 +136,36 @@ class AssistService : AccessibilityService() {
         val before = prevItems
         watchStep++
         val step = watchStep
-        Bot.log("👁 ধাপ $step: আপনি ট্যাপ করলেন \"${label.take(40)}\"")
+        Bot.log("🔴 ধাপ $step: আপনি ট্যাপ করলেন \"${label.take(40)}\"")
+        val goodLabel = label.isNotEmpty() && label.length <= 30 &&
+            label.none { ch -> ch.isDigit() || ch == '"' }
+        var anchor = ""
+        if (goodLabel) {
+            anchor = label
+        } else {
+            for (x in before) {
+                if (x.label.length in 3..25 && x.label.none { ch -> ch.isDigit() || ch == '"' }) {
+                    anchor = x.label
+                    break
+                }
+            }
+        }
+        val gen = StringBuilder()
+        if (anchor.isNotEmpty()) gen.append("WAIT_TEXT \"").append(anchor).append("\" 10\n")
+        if (goodLabel) {
+            val same = before.filter { x -> x.label.equals(label, true) }
+            var which = "last"
+            if (same.size > 1) {
+                val top = same.minOf { x -> x.rect.centerY() }
+                val bot = same.maxOf { x -> x.rect.centerY() }
+                if (Math.abs(r.centerY() - top) < Math.abs(r.centerY() - bot)) which = "first"
+            }
+            gen.append("TAP_EXACT \"").append(label).append("\" ").append(which).append("\n")
+        } else {
+            gen.append("TAP_XY ").append(r.centerX()).append(" ").append(r.centerY()).append("\n")
+        }
+        gen.append("WAIT 3\n")
+        Bot.addStep(gen.toString())
         mainHandler.postDelayed({
             val after = currentItems() ?: emptyList()
             val bset = before.map { x -> x.label }.toSet()
@@ -225,6 +260,7 @@ class AssistService : AccessibilityService() {
         return currentItems()?.any { matchItem(it, label, exact) } == true
     }
 
+    // FIXED: Better Mini App detection - wait for bottom nav
     private fun inMiniApp(): Boolean {
         val items = currentItems() ?: return false
         val keys = listOf("Home", "Tasks", "Games", "Friends", "Profile")
@@ -528,15 +564,18 @@ class AssistService : AccessibilityService() {
         return true
     }
 
-    // ---------------- শেখা (৩ মিনিট) ----------------
+    // ---------------- শেখা (৩ মিনিট) - FIXED ----------------
 
     private fun explore() {
         Bot.log("🎓 শেখা শুরু (সর্বোচ্চ ৩ মিনিট)। স্ক্রিনে হাত দেবেন না")
         var ready = false
-        for (w in 1..12) {
+        // Wait for Mini App to fully load with bottom nav
+        for (w in 1..20) {
             if (Bot.cancel) return
             if (!gate()) return
             if (inMiniApp()) {
+                // Extra wait for WebView to stabilize
+                sleepC(2000)
                 ready = true
                 break
             }
@@ -569,7 +608,7 @@ class AssistService : AccessibilityService() {
                 Bot.log("(\"$tab\" ট্যাব পাওয়া যায়নি)")
                 continue
             }
-            sleepC(2000)
+            sleepC(2500)
             waitStable(3000)
             val its = currentItems()
             if (its != null) recordPage(tab, its)
