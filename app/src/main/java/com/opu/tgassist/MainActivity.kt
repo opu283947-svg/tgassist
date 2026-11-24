@@ -73,6 +73,7 @@ class MainActivity : Activity() {
     private lateinit var docScroll: ScrollView
     private lateinit var codeBox: EditText
     private lateinit var autoBtn: Button
+    private lateinit var watchBtn: Button
     private var lastMemLen = -1L
     private var pageCount = 0
 
@@ -316,6 +317,12 @@ LOG "পরীক্ষা শেষ"
         val p = LinearLayout(this)
         p.orientation = LinearLayout.VERTICAL
 
+        val note = TextView(this)
+        note.text = "ℹ এটা অ্যাপের ভেতরের AI নয়। এই ট্যাব Claude.ai চ্যাটে পাঠানোর প্যাকেজ বানায়, বুঝে-সুঝে স্ক্রিপ্ট লিখে দেয় ওই Claude।"
+        note.setTextColor(Color.parseColor(AMB))
+        note.textSize = 11f
+        note.setPadding(dp(4), dp(2), dp(4), dp(4))
+        p.addView(note)
         p.addView(caption("✦ আমি কী চাই (বাংলায় লিখুন)"))
         aiRequest = edit("যেমন: Tasks পেজের Daily ট্যাবের Watch বাটনগুলো একে একে ট্যাপ করো")
         p.addView(aiRequest, lp(LinearLayout.LayoutParams.MATCH_PARENT, dp(90), 0f))
@@ -358,8 +365,10 @@ LOG "পরীক্ষা শেষ"
         docScroll.addView(docView)
         p.addView(docScroll, lp(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
+        watchBtn = pill("👁 দেখাও", "#c4161c", 11f) { toggleWatch() }
         p.addView(row(
-            pill("🎓 শেখা ৩ মি.", "#8a2a14", 12f) { startLearn() },
+            pill("🎓 শেখা", "#8a2a14", 11f) { startLearn() },
+            watchBtn,
             pill("মেমরি কপি", "#4a1a14", 12f) { copyText(memoryDoc(150000), "মেমরি") },
             pill("মেমরি রিসেট", "#4a1a14", 12f) {
                 Store.write(this, "memory.txt", "")
@@ -419,7 +428,10 @@ LOG "পরীক্ষা শেষ"
             return
         }
         Bot.enabled = !Bot.enabled
-        if (!Bot.enabled) Bot.cancel = true
+        if (!Bot.enabled) {
+            Bot.cancel = true
+            Bot.watch = false
+        }
         Bot.log(if (Bot.enabled) "▶ অ্যাসিস্ট্যান্ট চালু" else "■ অ্যাসিস্ট্যান্ট বন্ধ")
         if (Bot.enabled && autoOn()) {
             val code = Store.read(this, "playbook.txt")
@@ -471,6 +483,19 @@ LOG "পরীক্ষা শেষ"
         Bot.log("⏹ থামানোর অনুরোধ পাঠানো হলো")
     }
 
+    private fun toggleWatch() {
+        if (!Bot.watch && !needOn()) return
+        Bot.watch = !Bot.watch
+        if (Bot.watch) {
+            Bot.log("👁 দেখার মোড চালু: Telegram-এ আপনি যা যা করবেন সব লেখা হবে")
+            Toast.makeText(this, "এখন Telegram-এ নিজে করে দেখান। শেষে আবার 👁 চাপুন", Toast.LENGTH_LONG).show()
+        } else {
+            Bot.log("👁 দেখার মোড বন্ধ। Memory ট্যাবে সব লেখা আছে")
+        }
+        lastMemLen = -1L
+        refresh()
+    }
+
     private fun startLearn() {
         if (!needOn()) return
         if (Bot.busy) Bot.cancel = true
@@ -504,6 +529,7 @@ LOG "পরীক্ষা শেষ"
         sb.append("## আমার চাওয়া\n").append(if (req.isEmpty()) "(লেখা হয়নি)" else req).append("\n\n")
         sb.append("## স্ক্রিপ্টের কমান্ড\n")
         sb.append("WAIT সেকেন্ড | WAIT_TEXT \"লেখা\" সেকেন্ড | TAP_TEXT \"লেখা\" [first|last] | TAP_XY x y | SWIPE_UP | SWIPE_DOWN | BACK | LOG \"বার্তা\" | STOP\n")
+        sb.append("EXPECT \"লেখা\" (না থাকলে থামে) | TAP_EXACT \"লেখা\" [first|last] (হুবহু মিললে)\n")
         sb.append("REPEAT n ... END | IF_TEXT \"লেখা\" ... END | IF_NOT_TEXT \"লেখা\" ... END | # দিয়ে মন্তব্য\n\n")
         sb.append("## শেষ দেখা Telegram স্ক্রিন\n").append(screen).append("\n\n")
         sb.append("## শেখা মেমরি (শেষ অংশ)\n").append(memTail).append("\n\n")
@@ -528,6 +554,7 @@ LOG "পরীক্ষা শেষ"
         status.text = when {
             !acc -> "Accessibility বন্ধ। বাটনে চাপুন, সেটিংসে চালু করুন"
             !Bot.enabled -> "প্রস্তুত। ON করে Telegram খুলুন"
+            Bot.watch -> "👁 দেখছে: আপনি যা করছেন সব লিখে রাখছে"
             Bot.busy && Bot.inTelegram -> "▶ কাজ করছে (স্ক্রিপ্ট/শেখা)"
             Bot.inTelegram -> "▶ Telegram-এ আছে, নজর রাখছে"
             else -> "⏸ বিরতি: Telegram-এ গেলে নিজে চালু হবে"
@@ -552,6 +579,7 @@ LOG "পরীক্ষা শেষ"
         powerIcon.invalidate()
         powerText.setTextColor(ink)
 
+        watchBtn.text = if (Bot.watch) "👁 বন্ধ করুন" else "👁 দেখাও"
         autoBtn.text = if (autoOn()) "অটো-রান: চালু" else "অটো-রান: বন্ধ"
 
         val memLen = java.io.File(filesDir, "memory.txt").length() +

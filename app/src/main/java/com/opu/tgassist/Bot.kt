@@ -13,6 +13,7 @@ object Bot {
     @Volatile var inTelegram = false
     @Volatile var cancel = false
     @Volatile var busy = false
+    @Volatile var watch = false
     @Volatile var lastOwnTapAt = 0L
     @Volatile var lastItems: List<Item> = emptyList()
 

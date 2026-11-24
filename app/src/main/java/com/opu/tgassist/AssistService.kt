@@ -24,6 +24,9 @@ class AssistService : AccessibilityService() {
     private var lastDumpAt = 0L
     private var lastSig = ""
     private var lastTapAt = 0L
+    private var prevItems: List<Item> = emptyList()
+    private var lastPrevAt = 0L
+    private var watchStep = 0
     private val seenPages = HashSet<String>()
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
 
@@ -35,7 +38,7 @@ class AssistService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         Bot.serviceConnected = true
-        Bot.log("Accessibility চালু (v0.8)")
+        Bot.log("Accessibility চালু (v0.9)")
         startWorker()
     }
 
@@ -69,6 +72,15 @@ class AssistService : AccessibilityService() {
         if (!Bot.enabled) return
         if (!isTelegram(pkg)) return
 
+        if (Bot.watch && !Bot.busy && event.eventType != AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            val nowW = System.currentTimeMillis()
+            if (nowW - lastPrevAt > 700) {
+                lastPrevAt = nowW
+                val snap = currentItems()
+                if (snap != null) prevItems = snap
+            }
+        }
+
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
             noteUserTap(event)
             return
@@ -88,7 +100,7 @@ class AssistService : AccessibilityService() {
             recordPage("নিজে নিজে", items)
         }
 
-        if (now - lastTapAt > 8000) {
+        if (!Bot.watch && now - lastTapAt > 8000) {
             val m = items.filter { it.label.contains("Open CherryPlay", true) }
             if (m.isNotEmpty()) {
                 lastTapAt = now
@@ -96,9 +108,53 @@ class AssistService : AccessibilityService() {
                 tapAtAsync(r.exactCenterX(), r.exactCenterY())
             }
         }
+        if (!Bot.watch && now - lastTapAt > 3000) {
+            val dm = items.filter { it.label.equals("Maybe later", true) }
+            if (dm.isNotEmpty()) {
+                lastTapAt = now
+                val r2 = dm[dm.size - 1].rect
+                Bot.log("🧹 পপআপ বন্ধ করছি: Maybe later")
+                tapAtAsync(r2.exactCenterX(), r2.exactCenterY())
+            }
+        }
+    }
+
+    private fun watchRecord(event: AccessibilityEvent) {
+        if (System.currentTimeMillis() - Bot.lastOwnTapAt < 2500) return
+        val src = event.source
+        var label = src?.text?.toString()?.trim().orEmpty()
+        if (label.isEmpty()) label = src?.contentDescription?.toString()?.trim().orEmpty()
+        if (label.isEmpty()) label = event.text.joinToString(" ").trim()
+        val r = Rect()
+        src?.getBoundsInScreen(r)
+        val before = prevItems
+        watchStep++
+        val step = watchStep
+        Bot.log("👁 ধাপ $step: আপনি ট্যাপ করলেন \"${label.take(40)}\"")
+        mainHandler.postDelayed({
+            val after = currentItems() ?: emptyList()
+            val bset = before.map { x -> x.label }.toSet()
+            val aset = after.map { x -> x.label }.toSet()
+            val added = after.map { x -> x.label }.filter { l -> l !in bset }.distinct().take(14)
+            val gone = before.map { x -> x.label }.filter { l -> l !in aset }.distinct().take(8)
+            val was = before.map { x -> x.label }.filter { l -> l.none { ch -> ch.isDigit() } }
+                .distinct().take(10)
+            val sb = StringBuilder()
+            sb.append("STEP ").append(step).append("  USER_TAP \"").append(label).append("\" ")
+                .append(r.centerX()).append(",").append(r.centerY()).append("\n")
+            sb.append("  আগে ছিল: ").append(was.joinToString(" | ")).append("\n")
+            sb.append("  নতুন এসেছে: ").append(added.joinToString(" | ")).append("\n")
+            sb.append("  চলে গেছে: ").append(gone.joinToString(" | ")).append("\n")
+            Store.append(this, "memory.txt", sb.toString())
+            Bot.log("   → নতুন এসেছে: " + added.take(6).joinToString(" | "))
+        }, 1500)
     }
 
     private fun noteUserTap(event: AccessibilityEvent) {
+        if (Bot.watch) {
+            watchRecord(event)
+            return
+        }
         if (Bot.busy) return
         if (System.currentTimeMillis() - Bot.lastOwnTapAt < 2500) return
         val src = event.source
@@ -159,6 +215,21 @@ class AssistService : AccessibilityService() {
         Store.append(this, "memory.txt", sb.toString())
         Bot.log("📘 শিখলাম: $label (${items.size}টা আইটেম)")
         return true
+    }
+
+    private fun matchItem(x: Item, label: String, exact: Boolean): Boolean =
+        if (exact) x.label.equals(label, true) else x.label.contains(label, true)
+
+    private fun hasMatch(label: String, exact: Boolean): Boolean {
+        if (label.isEmpty()) return false
+        return currentItems()?.any { matchItem(it, label, exact) } == true
+    }
+
+    private fun inMiniApp(): Boolean {
+        val items = currentItems() ?: return false
+        val keys = listOf("Home", "Tasks", "Games", "Friends", "Profile")
+        val n = keys.count { k -> items.any { x -> x.label.equals(k, true) } }
+        return n >= 3
     }
 
     private fun hasText(label: String): Boolean {
@@ -288,18 +359,18 @@ class AssistService : AccessibilityService() {
         return false
     }
 
-    private fun tapText(label: String, last: Boolean): Boolean {
+    private fun tapText(label: String, last: Boolean, exact: Boolean = false): Boolean {
         val end = System.currentTimeMillis() + 10000L
         while (System.currentTimeMillis() < end && !Bot.cancel) {
             if (!gate()) return false
-            if (hasText(label)) {
+            if (hasMatch(label, exact)) {
                 waitStable(3000)
                 val items = currentItems()
                 if (items == null) {
                     sleepC(500)
                     continue
                 }
-                val pool = items.filter { it.label.contains(label, true) && it.rect.width() > 0 }
+                val pool = items.filter { matchItem(it, label, exact) && it.rect.width() > 0 }
                 if (pool.isEmpty()) {
                     sleepC(500)
                     continue
@@ -425,6 +496,19 @@ class AssistService : AccessibilityService() {
                 if (!tapXY(x, y)) return false
                 sleepC(1200)
             }
+            "EXPECT" -> {
+                for (t in a) {
+                    if (!hasText(t)) {
+                        Bot.log("⚠ EXPECT: \"$t\" নেই, ভুল পেজে আছি, থামলাম")
+                        return false
+                    }
+                }
+            }
+            "TAP_EXACT" -> {
+                val t = a.getOrNull(0) ?: ""
+                val last = (a.getOrNull(1) ?: "last").lowercase() != "first"
+                if (!tapText(t, last, true)) return false
+            }
             "SWIPE_UP" -> {
                 swipe(true)
                 sleepC(1200)
@@ -448,6 +532,20 @@ class AssistService : AccessibilityService() {
 
     private fun explore() {
         Bot.log("🎓 শেখা শুরু (সর্বোচ্চ ৩ মিনিট)। স্ক্রিনে হাত দেবেন না")
+        var ready = false
+        for (w in 1..12) {
+            if (Bot.cancel) return
+            if (!gate()) return
+            if (inMiniApp()) {
+                ready = true
+                break
+            }
+            sleepC(1000)
+        }
+        if (!ready) {
+            Bot.log("⚠ CherryPlay Mini App খোলা নেই (নিচে Home/Tasks/Games/Friends/Profile দেখা যাচ্ছে না)। কিছু ট্যাপ করিনি, থামলাম")
+            return
+        }
         val end = System.currentTimeMillis() + 180000L
         val first = currentItems()
         if (first != null) recordPage("শুরু", first)
@@ -462,8 +560,12 @@ class AssistService : AccessibilityService() {
         for (entry in plan) {
             if (Bot.cancel || System.currentTimeMillis() > end) break
             if (!gate()) break
+            if (!inMiniApp()) {
+                Bot.log("⚠ Mini App থেকে বেরিয়ে গেছি, থামলাম")
+                break
+            }
             val tab = entry.first
-            if (!tapText(tab, true)) {
+            if (!tapText(tab, true, true)) {
                 Bot.log("(\"$tab\" ট্যাব পাওয়া যায়নি)")
                 continue
             }
@@ -485,7 +587,7 @@ class AssistService : AccessibilityService() {
             }
             for (sub in entry.second) {
                 if (Bot.cancel || System.currentTimeMillis() > end) break
-                if (tapText(sub, false)) {
+                if (inMiniApp() && tapText(sub, false)) {
                     sleepC(1800)
                     waitStable(3000)
                     val s2 = currentItems()
